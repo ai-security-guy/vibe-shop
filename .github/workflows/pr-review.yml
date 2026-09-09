@@ -40,6 +40,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: 'false'
 
+      - name: 'Checkout PR head'
+        env:
+          PR_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request_number }}'
+        run: |-
+          git fetch origin pull/"$PR_NUMBER"/head
+          git checkout -q FETCH_HEAD
+
       - name: 'Post status comment'
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
