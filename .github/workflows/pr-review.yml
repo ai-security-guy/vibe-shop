@@ -1,0 +1,94 @@
+name: '🔎 PR-noia Security Review'
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: 'Pull request number to review'
+        required: true
+        type: number
+
+concurrency:
+  group: '${{ github.workflow }}-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request_number }}'
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  review:
+    if: |
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/review'))
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      contents: 'read'
+      issues: 'write'
+      pull-requests: 'write'
+
+    steps:
+      - name: 'Checkout repository'
+        uses: 'actions/checkout@v4'
+        with:
+          fetch-depth: 0
+          persist-credentials: 'false'
+
+      - name: 'Post status comment'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request_number }}'
+          REPO: '${{ github.repository }}'
+        run: |-
+          gh issue comment "$PR_NUMBER" --repo "$REPO" --body "🔎 **PR-noia** is analyzing this pull request for security issues. Inline comments and a summary will follow when the review completes. Comment \`/review\` any time to re-run."
+
+      - name: 'Set up Python'
+        uses: 'actions/setup-python@v4'
+        with:
+          python-version: '3.11'
+
+      - name: 'Install dependencies'
+        run: |-
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: 'Collect PR data and assets'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request_number }}'
+          REPO: '${{ github.repository }}'
+        run: |-
+          mkdir -p ./pr_assets
+          gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json number,title,body,author,baseRefName,headRefName,headRefOid,files \
+            > ./pr_assets/pr_info.json
+          gh pr diff "$PR_NUMBER" --repo "$REPO" > ./pr_assets/pr_diff.patch
+          gh api graphql \
+            -F owner='${{ github.repository_owner }}' \
+            -F name='${{ github.event.repository.name }}' \
+            -F number="$PR_NUMBER" \
+            -f query='
+              query($owner: String!, $name: String!, $number: Int!) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $number) {
+                    comments(first: 100) {
+                      nodes { author { login } body createdAt }
+                    }
+                  }
+                }
+              }
+            ' > ./pr_assets/pr_comments.json
+
+      - name: 'Submit scan to PR-noia'
+        env:
+          PRNOIA_SERVER_URL: '${{ vars.PRNOIA_SERVER_URL }}'
+          PRNOIA_API_KEY: '${{ secrets.PRNOIA_API_KEY }}'
+          GITHUB_REPOSITORY: '${{ github.repository }}'
+        run: |-
+          python .github/scripts/prnoia_client.py
